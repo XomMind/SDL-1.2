@@ -28,6 +28,7 @@
 */
 
 #include "SDL_video.h"
+#include "../statmind_blit.h"
 #include "SDL_blit.h"
 
 /* This isn't ready for general consumption yet - it should be folded

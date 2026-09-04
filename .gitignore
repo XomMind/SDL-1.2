@@ -77,3 +77,6 @@ sdl-config
 sdl.pc
 test/aclocal.m4
 test/configure
+
+# out-of-tree cross build
+build-win32/

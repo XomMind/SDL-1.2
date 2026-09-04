@@ -27,6 +27,7 @@
 #include "SDL.h"
 #include "SDL_sysvideo.h"
 #include "SDL_blit.h"
+#include "../statmind_blit.h"
 #include "SDL_pixels_c.h"
 #include "SDL_cursor_c.h"
 #include "../events/SDL_sysevents.h"
@@ -579,6 +580,7 @@ static void SDL_CreateShadowSurface(int depth)
  */
 SDL_Surface * SDL_SetVideoMode (int width, int height, int bpp, Uint32 flags)
 {
+	Statmind_Count(SMC_SET_VIDEOMODE);
 	SDL_VideoDevice *video, *this;
 	SDL_Surface *prev_mode, *mode;
 	int video_w;
@@ -1005,6 +1007,7 @@ SDL_Surface *SDL_DisplayFormatAlpha(SDL_Surface *surface)
  */
 void SDL_UpdateRect(SDL_Surface *screen, Sint32 x, Sint32 y, Uint32 w, Uint32 h)
 {
+	Statmind_Count(SMC_UPDATE_RECT);
 	if ( screen ) {
 		SDL_Rect rect;
 
@@ -1028,6 +1031,10 @@ void SDL_UpdateRect(SDL_Surface *screen, Sint32 x, Sint32 y, Uint32 w, Uint32 h)
 }
 void SDL_UpdateRects (SDL_Surface *screen, int numrects, SDL_Rect *rects)
 {
+	/* Statmind: end of a composed frame. */
+	Statmind_Count(SMC_UPDATE_RECTS);
+	Statmind_PublishFrame();
+
 	int i;
 	SDL_VideoDevice *video = current_video;
 	SDL_VideoDevice *this = current_video;
@@ -1097,6 +1104,10 @@ void SDL_UpdateRects (SDL_Surface *screen, int numrects, SDL_Rect *rects)
 int SDL_Flip(SDL_Surface *screen)
 {
 	SDL_VideoDevice *video = current_video;
+	/* Statmind: end of a composed frame. */
+	Statmind_Count(SMC_FLIP);
+	Statmind_PublishFrame();
+
 	/* Copy the shadow surface to the video surface */
 	if ( screen == SDL_ShadowSurface ) {
 		SDL_Rect rect;
@@ -1522,6 +1533,8 @@ int SDL_GL_GetAttribute(SDL_GLattr attr, int* value)
 /* Perform a GL buffer swap on the current GL context */
 void SDL_GL_SwapBuffers(void)
 {
+	Statmind_Count(SMC_GL_SWAP);
+	Statmind_PublishFrame();
 	SDL_VideoDevice *video = current_video;
 	SDL_VideoDevice *this = current_video;
 

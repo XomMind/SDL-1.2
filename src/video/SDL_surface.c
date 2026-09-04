@@ -25,6 +25,7 @@
 #include "SDL_sysvideo.h"
 #include "SDL_cursor_c.h"
 #include "SDL_blit.h"
+#include "../statmind_blit.h"
 #include "SDL_RLEaccel_c.h"
 #include "SDL_pixels_c.h"
 #include "SDL_leaks.h"
@@ -407,6 +408,7 @@ void SDL_GetClipRect(SDL_Surface *surface, SDL_Rect *rect)
 int SDL_LowerBlit (SDL_Surface *src, SDL_Rect *srcrect,
 				SDL_Surface *dst, SDL_Rect *dstrect)
 {
+	Statmind_Count(SMC_LOWER_BLIT);
 	SDL_blit do_blit;
 	SDL_Rect hw_srcrect;
 	SDL_Rect hw_dstrect;
@@ -521,12 +523,15 @@ int SDL_UpperBlit (SDL_Surface *src, SDL_Rect *srcrect,
 			h -= dy;
 	}
 
+	Statmind_Count(SMC_UPPER_BLIT);
 	if(w > 0 && h > 0) {
 	        SDL_Rect sr;
 	        sr.x = srcx;
 		sr.y = srcy;
 		sr.w = dstrect->w = w;
 		sr.h = dstrect->h = h;
+		/* Statmind: what gets drawn is what the player can see. */
+		Statmind_RecordBlit(src, srcx, srcy, dstrect->x, dstrect->y, w, h);
 		return SDL_LowerBlit(src, &sr, dst, dstrect);
 	}
 	dstrect->w = dstrect->h = 0;
@@ -552,6 +557,10 @@ static int SDL_FillRect4(SDL_Surface *dst, SDL_Rect *dstrect, Uint32 color)
  */
 int SDL_FillRect(SDL_Surface *dst, SDL_Rect *dstrect, Uint32 color)
 {
+	Statmind_Count(SMC_FILL_RECT);
+	if (dstrect) {
+		Statmind_RecordFill(dstrect->x, dstrect->y, dstrect->w, dstrect->h, color);
+	}
 	SDL_VideoDevice *video = current_video;
 	SDL_VideoDevice *this  = current_video;
 	int x, y;
@@ -735,6 +744,7 @@ int SDL_FillRect(SDL_Surface *dst, SDL_Rect *dstrect, Uint32 color)
  */
 int SDL_LockSurface (SDL_Surface *surface)
 {
+	Statmind_Count(SMC_LOCK_SURFACE);
 	if ( ! surface->locked ) {
 		/* Perform the lock */
 		if ( surface->flags & (SDL_HWSURFACE|SDL_ASYNCBLIT) ) {
@@ -763,6 +773,7 @@ int SDL_LockSurface (SDL_Surface *surface)
  */
 void SDL_UnlockSurface (SDL_Surface *surface)
 {
+	Statmind_Count(SMC_UNLOCK_SURFACE);
 	/* Only perform an unlock if we are locked */
 	if ( ! surface->locked || (--surface->locked > 0) ) {
 		return;
