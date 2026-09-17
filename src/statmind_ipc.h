@@ -268,6 +268,18 @@ void Statmind_PublishFrame(void)
 #define LUIGI_ST_NOT_WRITABLE -5  // flag page refused to become writable
 #define LUIGI_ST_UNSUPPORTED  -6  // not a Win32 build
 
+// Everything the out-of-process reader needs to know about this executable.
+//
+// StatMind reads the game's memory from outside and cannot fingerprint a data
+// address from there, so it used to carry its own copies as constants. That
+// held only while every supported build agreed on them, which the Steam build
+// ended. The shim resolves the build in-process and publishes the addresses
+// here; the reader finds this struct by its magic and takes them, so the build
+// table stays the single source of truth.
+//
+// player_rec is zero on a build where it has never been read -- it is
+// zero-fill with no reference to pin it. A reader must refuse that field
+// rather than fall back to another build's value.
 typedef struct {
     unsigned int magic;
     unsigned int check;
@@ -275,20 +287,21 @@ typedef struct {
     unsigned int module_base;   // resolved image base
     unsigned int flag_addr;     // absolute address of luigiAiActive
     unsigned int struct_addr;   // absolute address of the LuigiAi instance
+    unsigned int build_stamp;   // PE timestamp, identifies the build
+    unsigned int map_object;    // { int w; int h; Cell **cells; }
+    unsigned int player_rec;    // { u32 handle; i32 x; i32 y; i32 id }, 0 = unknown
+    unsigned int view_origin;   // { i32 x; i32 y }
+    unsigned int scorekeeper;   // Scorekeeper `this`
 } StatmindLuigiStatus;
 
 __attribute__((dllexport))
 __attribute__((used))
 StatmindLuigiStatus g_statmind_luigi = {
-    LUIGI_STATUS_MAGIC, LUIGI_STATUS_CHECK, LUIGI_ST_UNTRIED, 0, 0, 0
+    LUIGI_STATUS_MAGIC, LUIGI_STATUS_CHECK, LUIGI_ST_UNTRIED,
+    0, 0, 0, 0, 0, 0, 0, 0
 };
 
 #ifdef _WIN32
-
-// Data RVAs are unchanged in both fingerprinted Beta 17.1 builds.
-#define LUIGI_RVA_ACTIVE  0x008EFB3EU
-#define LUIGI_RVA_TEST    0x008EFB36U
-#define LUIGI_RVA_STRUCT  0x008EBFFCU
 
 // Make one byte writable if it isn't already. .data is normally mapped
 // read/write, so this is belt-and-braces: a write to a read-only page
@@ -318,6 +331,7 @@ static int Statmind_EnableLuigiAi(void)
     unsigned char *flag;
     unsigned int   e_lfanew;
     const char    *env;
+    const StatmindBuild *build;
 
     env = getenv("STATMIND_LUIGI");
     if (env != NULL && env[0] == '0') {
@@ -353,8 +367,10 @@ static int Statmind_EnableLuigiAi(void)
         return 0;
     }
 
-    // Resolve the exact build before trusting the shared data RVAs.
-    if (!Statmind_FindBuild(base)) {
+    // Resolve the exact build. Every address below comes from its row, and
+    // none of them carry over between builds.
+    build = Statmind_FindBuild(base);
+    if (!build) {
         g_statmind_luigi.status = LUIGI_ST_SIG_MISMATCH;
         printf("[Statmind_Luigi] build fingerprint mismatch at base 0x%08X"
                " -- unsupported executable, leaving memory untouched.\n",
@@ -363,9 +379,14 @@ static int Statmind_EnableLuigiAi(void)
         return 0;
     }
 
-    flag = base + LUIGI_RVA_ACTIVE;
-    g_statmind_luigi.flag_addr   = (unsigned int)(size_t)flag;
-    g_statmind_luigi.struct_addr = (unsigned int)(size_t)(base + LUIGI_RVA_STRUCT);
+    flag = base + (build->active - 0x400000);
+    g_statmind_luigi.flag_addr    = (unsigned int)(size_t)flag;
+    g_statmind_luigi.struct_addr  = (unsigned int)(size_t)(base + (build->luigi - 0x400000));
+    g_statmind_luigi.build_stamp  = build->timestamp;
+    g_statmind_luigi.map_object   = build->map_object;
+    g_statmind_luigi.player_rec   = build->player_rec;
+    g_statmind_luigi.view_origin  = build->view_origin;
+    g_statmind_luigi.scorekeeper  = build->scorekeeper;
 
     if (!Statmind_MakeWritable(flag)) {
         g_statmind_luigi.status = LUIGI_ST_NOT_WRITABLE;
@@ -385,10 +406,19 @@ static int Statmind_EnableLuigiAi(void)
 
     *flag = 1;
     g_statmind_luigi.status = LUIGI_ST_ENABLED;
-    printf("[Statmind_Luigi] Enabled. base=0x%08X luigiAiActive=0x%08X luigiAi=0x%08X\n",
+    printf("[Statmind_Luigi] Enabled. build=0x%08X base=0x%08X luigiAiActive=0x%08X"
+           " luigiAi=0x%08X map=0x%08X player=0x%08X view=0x%08X\n",
+           g_statmind_luigi.build_stamp,
            g_statmind_luigi.module_base,
            g_statmind_luigi.flag_addr,
-           g_statmind_luigi.struct_addr);
+           g_statmind_luigi.struct_addr,
+           g_statmind_luigi.map_object,
+           g_statmind_luigi.player_rec,
+           g_statmind_luigi.view_origin);
+    if (!build->player_rec) {
+        printf("[Statmind_Luigi] player record not yet located on this build;"
+               " the reader will refuse player queries.\n");
+    }
     fflush(stdout);
 
     // Optional: the second byte tested along the map-load path, believed to
@@ -397,8 +427,8 @@ static int Statmind_EnableLuigiAi(void)
     // in Beta 17, so the write target is unverified. Opt in to identify which
     // of the two bytes is actually which.
     env = getenv("STATMIND_LUIGI_TEST");
-    if (env != NULL && env[0] == '1') {
-        unsigned char *tflag = base + LUIGI_RVA_TEST;
+    if (env != NULL && env[0] == '1' && build->luigi_test) {
+        unsigned char *tflag = base + (build->luigi_test - 0x400000);
         if (Statmind_MakeWritable(tflag)) {
             *tflag = 1;
             printf("[Statmind_Luigi] luigiAiTest candidate set at 0x%08X.\n",
