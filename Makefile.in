@@ -75,6 +75,9 @@ depend:
 
 include $(depend)
 
+# makedep.sh does not discover the shim's private headers.
+$(objects)/SDL.lo: $(srcdir)/src/statmind_ipc.h $(srcdir)/src/statmind_scoresheet.h $(srcdir)/src/statmind_build.h
+
 $(objects)/$(TARGET): $(OBJECTS)
 	$(LIBTOOL) --mode=link $(CC) -o $@ $(OBJECTS) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LT_LDFLAGS)
 

@@ -79,6 +79,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "statmind_build.h"
 
 #define STATMIND_SS_MAGIC 0xBADBEEF5
 #define STATMIND_SS_CHECK 0x79533EDD
@@ -129,46 +130,6 @@ StatmindScoresheet g_statmind_scoresheet = {
 };
 
 #ifdef _WIN32
-
-// Scorekeeper::outputScoresheet
-#define SS_RVA_FN        0x00074B90U  // -> VA 0x00474B90
-// movzx eax,BYTE PTR [ebp+0xc] / test / jne  -- the isDump parameter
-#define SS_RVA_BOOL      0x00074BD0U  // -> VA 0x00474BD0
-// movzx ecx,BYTE PTR [ebp+0xc] / test / jne over the scorehistory.txt append
-#define SS_RVA_GUARD     0x0007E920U  // -> VA 0x0047E920
-// mov esp,ebp / pop ebp / ret 8
-#define SS_RVA_EPILOGUE  0x0007F43DU  // -> VA 0x0047F43D
-// push 1 / lea eax,[ebp-0x2c] / push eax / mov ecx,<singleton> / call fn
-#define SS_RVA_CALLSITE  0x003D640BU  // -> VA 0x007D640B
-
-static const unsigned char SS_SIG_FN[10] = {
-    0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0xBA, 0x26, 0xAE, 0x00
-};
-static const unsigned char SS_SIG_BOOL[8] = {
-    0x0F, 0xB6, 0x45, 0x0C, 0x85, 0xC0, 0x0F, 0x85
-};
-static const unsigned char SS_SIG_GUARD[8] = {
-    0x0F, 0xB6, 0x4D, 0x0C, 0x85, 0xC9, 0x75, 0x0B
-};
-static const unsigned char SS_SIG_EPILOGUE[6] = {
-    0x8B, 0xE5, 0x5D, 0xC2, 0x08, 0x00
-};
-// The imm32 at +6 is the singleton and is deliberately not compared.
-static const unsigned char SS_SIG_CALLSITE[7] = {
-    0x6A, 0x01, 0x8D, 0x45, 0xD4, 0x50, 0xB9
-};
-
-static int Statmind_SsMatch(const unsigned char *at,
-                            const unsigned char *sig, unsigned int n)
-{
-    unsigned int i;
-    for (i = 0; i < n; ++i) {
-        if (at[i] != sig[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
 
 // MSVC 2010 std::basic_string<char>:
 //   +0x00 union { char buf[16]; char *ptr; }
@@ -246,7 +207,7 @@ static int Statmind_ResolveScoresheet(void)
     unsigned char *fn;
     unsigned char *cs;
     unsigned int self;
-    int rel;
+    const StatmindBuild *build;
 
     if (env && env[0] == '0') {
         g_statmind_scoresheet.status = SS_ST_DISABLED;
@@ -267,41 +228,16 @@ static int Statmind_ResolveScoresheet(void)
         return 0;
     }
 
-    fn = base + SS_RVA_FN;
-    cs = base + SS_RVA_CALLSITE;
-
-    // Four checks on the writer itself. The prologue pins the function; the
-    // two [ebp+0xc] sites pin where the bool lives and that the
-    // scorehistory.txt append really is guarded by it; the epilogue pins the
-    // calling convention. Any mismatch means this is not the build these
-    // offsets were read from, and calling would be a wild jump.
-    if (!Statmind_SsMatch(fn, SS_SIG_FN, sizeof(SS_SIG_FN)) ||
-        !Statmind_SsMatch(base + SS_RVA_BOOL, SS_SIG_BOOL, sizeof(SS_SIG_BOOL)) ||
-        !Statmind_SsMatch(base + SS_RVA_GUARD, SS_SIG_GUARD, sizeof(SS_SIG_GUARD)) ||
-        !Statmind_SsMatch(base + SS_RVA_EPILOGUE, SS_SIG_EPILOGUE,
-                          sizeof(SS_SIG_EPILOGUE))) {
+    build = Statmind_FindBuild(base);
+    if (!build) {
         g_statmind_scoresheet.status = SS_ST_SIG_MISMATCH;
-        printf("[Statmind_Scoresheet] writer fingerprint failed at base 0x%08X"
-               " -- not Beta 17.1; dumps disabled\n",
-               g_statmind_scoresheet.module_base);
+        printf("[Statmind_Scoresheet] unsupported build or fingerprint mismatch; dumps disabled\n");
         fflush(stdout);
         return 0;
     }
+    fn = base + build->writer;
+    cs = base + build->callsite;
 
-    // The singleton comes from the game's own call site rather than a
-    // literal, and the relative call there must land on the function we just
-    // fingerprinted. That cross-check is what makes the `this` pointer
-    // trustworthy.
-    rel = *(const int *)(cs + 11 + 1);
-    if (!Statmind_SsMatch(cs, SS_SIG_CALLSITE, sizeof(SS_SIG_CALLSITE)) ||
-        cs[11] != 0xE8 ||
-        (unsigned char *)(cs + 11 + 5 + rel) != fn) {
-        g_statmind_scoresheet.status = SS_ST_CALLSITE;
-        printf("[Statmind_Scoresheet] call site at RVA 0x%08X did not match;"
-               " no Scorekeeper pointer, dumps disabled\n", SS_RVA_CALLSITE);
-        fflush(stdout);
-        return 0;
-    }
     self = *(const unsigned int *)(cs + 6 + 1);
 
     g_statmind_scoresheet.fn_addr   = (unsigned int)(size_t)fn;

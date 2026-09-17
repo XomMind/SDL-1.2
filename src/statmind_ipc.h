@@ -1,4 +1,5 @@
 #include "statmind_blit.h"
+#include "statmind_build.h"
 #include "statmind_scoresheet.h"
 #include "SDL_events.h"
 #include "SDL_keyboard.h"
@@ -284,20 +285,10 @@ StatmindLuigiStatus g_statmind_luigi = {
 
 #ifdef _WIN32
 
-// RVAs, Beta 17.1 (COGMIND.exe, 9347072 bytes).
-// Add ImageBase 0x00400000 for the VAs quoted in the analysis notes.
-#define LUIGI_RVA_SIG1    0x00034C0AU  // movl $0x64adfa4c, (%eax)      -> VA 0x00434C0A
-#define LUIGI_RVA_SIG2    0x00034C13U  // movl $0x79533ed9, 0x4(%ecx)   -> VA 0x00434C13
-#define LUIGI_RVA_ACTIVE  0x0008EFB3EU // luigiAiActive : bool          -> VA 0x00CEFB3E
-#define LUIGI_RVA_TEST    0x0008EFB36U // luigiAiTest   : bool (probable)-> VA 0x00CEFB36
-#define LUIGI_RVA_STRUCT  0x0008EBFFCU // LuigiAi luigiAi               -> VA 0x00CEBFFC
-
-// The two magic-number stores at the head of LuigiAi::initialize().
-// These are build immediates, not strings, so they survive whatever the
-// string table is doing and pin the build far more tightly than a version
-// check would.
-static const unsigned char LUIGI_SIG1[6] = { 0xC7, 0x00, 0x4C, 0xFA, 0xAD, 0x64 };
-static const unsigned char LUIGI_SIG2[7] = { 0xC7, 0x41, 0x04, 0xD9, 0x3E, 0x53, 0x79 };
+// Data RVAs are unchanged in both fingerprinted Beta 17.1 builds.
+#define LUIGI_RVA_ACTIVE  0x008EFB3EU
+#define LUIGI_RVA_TEST    0x008EFB36U
+#define LUIGI_RVA_STRUCT  0x008EBFFCU
 
 // Make one byte writable if it isn't already. .data is normally mapped
 // read/write, so this is belt-and-braces: a write to a read-only page
@@ -362,13 +353,11 @@ static int Statmind_EnableLuigiAi(void)
         return 0;
     }
 
-    // Build fingerprint: the two magic stores in LuigiAi::initialize().
-    // Any other build lands here and we leave its memory alone.
-    if (memcmp(base + LUIGI_RVA_SIG1, LUIGI_SIG1, sizeof(LUIGI_SIG1)) != 0 ||
-        memcmp(base + LUIGI_RVA_SIG2, LUIGI_SIG2, sizeof(LUIGI_SIG2)) != 0) {
+    // Resolve the exact build before trusting the shared data RVAs.
+    if (!Statmind_FindBuild(base)) {
         g_statmind_luigi.status = LUIGI_ST_SIG_MISMATCH;
-        printf("[Statmind_Luigi] initialize() fingerprint mismatch at base 0x%08X"
-               " -- not Beta 17.1, leaving memory untouched.\n",
+        printf("[Statmind_Luigi] build fingerprint mismatch at base 0x%08X"
+               " -- unsupported executable, leaving memory untouched.\n",
                g_statmind_luigi.module_base);
         fflush(stdout);
         return 0;
