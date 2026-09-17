@@ -24,6 +24,19 @@
 #include "SDL_video.h"
 #include "SDL_blit.h"
 
+/*
+  The SIMD blitters below are x86-only.  These headers refuse to compile
+  anywhere else, and SDL 1.2 still builds for ARM, PowerPC and m68k, so
+  everything that needs them lives behind this one switch.
+*/
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+#define SDL_BLIT_X86_SIMD 1
+#else
+#define SDL_BLIT_X86_SIMD 0
+#endif
+
+#if SDL_BLIT_X86_SIMD
+
 #include <xmmintrin.h>
 #include <smmintrin.h>
 #include <immintrin.h>
@@ -34,16 +47,27 @@
 //  Windows
 #define cpuid(info, x)    __cpuidex(info, x, 0)
 #include <intrin.h>
+#define blit_xgetbv(index) _xgetbv(index)
 
 #else
 
 //  GCC Intrinsics
 #include <cpuid.h>
-void cpuid(int info[4], int InfoType){
+static void cpuid(int info[4], int InfoType){
     __cpuid_count(InfoType, 0, info[0], info[1], info[2], info[3]);
 }
 
+/* Written out by hand: <immintrin.h> only exposes _xgetbv under -mxsave,
+   and this has to run before we know the CPU has it. */
+static Uint64 blit_xgetbv(unsigned int index){
+    unsigned int eax, edx;
+    __asm__ __volatile__(".byte 0x0f, 0x01, 0xd0" : "=a"(eax), "=d"(edx) : "c"(index));
+    return (((Uint64)edx) << 32) | eax;
+}
+
 #endif
+
+#endif /* SDL_BLIT_X86_SIMD */
 
 /*
   In Visual C, VC6 has mmintrin.h in the "Processor Pack" add-on.
@@ -2749,23 +2773,54 @@ static void BlitNtoNSurfaceAlphaKey(SDL_BlitInfo *info)
 	}
 }
 
-int checkHasSSE41() {
+#if SDL_BLIT_X86_SIMD
+
+static int checkHasSSE41(void) {
 	int info[4];
 	cpuid(info, 1);
-	return (info[2] & ((int)1 << 19)) != 0;
+	return (info[2] & ((int)1 << 19)) != 0;	/* CPUID.1:ECX.SSE4_1[19] */
 }
 
-int checkHasAVX2() {
+/*
+  The feature bit alone is not enough for AVX2.  The OS also has to have
+  turned on XSAVE for the upper half of the YMM registers, or the first
+  VEX-encoded instruction raises #UD - which is exactly what happens to a
+  32-bit process under some hypervisors and older kernels.  So: OSXSAVE,
+  then XGETBV, then the feature bit.
+*/
+static int checkHasAVX2(void) {
 	int info[4];
-	cpuid(info, 0);
-	int nIds = info[0];
 
-	if (nIds >= 0x00000007){
-		cpuid(info, 0x00000007);
-		return (info[1] & ((int)1 <<  5)) != 0;
+	cpuid(info, 0);
+	if (info[0] < 0x00000007) {
+		return 0;			/* no leaf 7, so no AVX2 bit to read */
 	}
-	return 0;
+
+	cpuid(info, 1);
+	if ((info[2] & ((int)1 << 27)) == 0) {
+		return 0;			/* CPUID.1:ECX.OSXSAVE[27] - XGETBV would fault */
+	}
+	if ((blit_xgetbv(0) & 0x6) != 0x6) {
+		return 0;			/* XCR0[2:1] - OS is not saving XMM+YMM state */
+	}
+
+	cpuid(info, 7);				/* cpuid() already pins subleaf 0 */
+	return (info[1] & ((int)1 << 5)) != 0;	/* CPUID.7.0:EBX.AVX2[5] */
 }
+
+static int simd_probed = 0;
+static int hasAVX2 = 0;
+static int hasSSE41 = 0;
+
+static void probeSimd(void) {
+	if (!simd_probed) {
+		hasSSE41 = checkHasSSE41();
+		hasAVX2 = checkHasAVX2();
+		simd_probed = 1;		/* set last: a racing thread re-probes rather than reading half-filled flags */
+	}
+}
+
+#endif /* SDL_BLIT_X86_SIMD */
 
 /* Fast 32-bit RGBA->RGBA blending with pixel alpha */
 static void Blit8888to8888PixelAlpha(SDL_BlitInfo *info)
@@ -2795,7 +2850,34 @@ static void Blit8888to8888PixelAlpha(SDL_BlitInfo *info)
     }
 }
 
-void SDL_Get8888AlphaMaskAndShift(const SDL_PixelFormat *fmt, Uint32 *mask, Uint32 *shift)
+/*
+  The "8888" the swizzle blitters want: 32 bits per pixel with every channel
+  a whole byte, so a shift can be used as a byte index.  Anything else - a
+  2-byte ARGB1555 source, say - would have them read 4 bytes per pixel off
+  the end of the surface.
+*/
+static SDL_bool SDL_Is8888Format(const SDL_PixelFormat *fmt, SDL_bool need_alpha)
+{
+	if (fmt->BytesPerPixel != 4) {
+		return SDL_FALSE;
+	}
+	if (fmt->Rloss || fmt->Gloss || fmt->Bloss) {
+		return SDL_FALSE;
+	}
+	if ((fmt->Rshift & 7) || (fmt->Gshift & 7) || (fmt->Bshift & 7)) {
+		return SDL_FALSE;
+	}
+	if (fmt->Amask) {
+		if (fmt->Aloss || (fmt->Ashift & 7)) {
+			return SDL_FALSE;
+		}
+	} else if (need_alpha) {
+		return SDL_FALSE;
+	}
+	return SDL_TRUE;
+}
+
+static void SDL_Get8888AlphaMaskAndShift(const SDL_PixelFormat *fmt, Uint32 *mask, Uint32 *shift)
 {
 	if (fmt->Amask) {
 		*mask = fmt->Amask;
@@ -2856,6 +2938,8 @@ static void Blit8888to8888PixelAlphaSwizzle(SDL_BlitInfo *info)
 		dst += dstskip;
 	}
 }
+
+#if SDL_BLIT_X86_SIMD
 
 #ifndef _MSC_VER
 __attribute__((target ("sse4.1")))
@@ -3063,8 +3147,10 @@ static void Blit8888to8888PixelAlphaSwizzleAVX2(SDL_BlitInfo *info)
     }
 }
 
+#endif /* SDL_BLIT_X86_SIMD */
+
 /* General (slow) N->N blending with pixel alpha */
-void BlitNtoNPixelAlpha(SDL_BlitInfo *info) {
+static void BlitNtoNPixelAlpha(SDL_BlitInfo *info) {
 	int width = info->d_width;
 	int height = info->d_height;
 	Uint8* src = info->s_pixels;
@@ -3099,9 +3185,6 @@ void BlitNtoNPixelAlpha(SDL_BlitInfo *info) {
     }
 }
 
-
-static int hasAVX2 = -1;
-static int hasSSE41 = -1;
 
 SDL_loblit SDL_CalculateAlphaBlit(SDL_Surface *surface, int blit_index)
 {
@@ -3269,19 +3352,18 @@ SDL_loblit SDL_CalculateAlphaBlit(SDL_Surface *surface, int blit_index)
 		return Blit32to32PixelAlphaAltivec;
 	    else
 #endif
-        if (hasAVX2 == -1) {
-            hasAVX2 = checkHasAVX2();
-        }
-        if (hasAVX2) {
-            return Blit8888to8888PixelAlphaSwizzleAVX2;
-        }
-        if (hasSSE41 == -1) {
-            hasSSE41 = checkHasSSE41();
-        }
-        if (hasSSE41) {
-            return Blit8888to8888PixelAlphaSwizzleSSE41;
-        }
-        if (sf->BytesPerPixel == 4 && sf->Amask && df->BytesPerPixel == 4) {
+        /* Every blitter below reads and writes whole 32-bit 8888 pixels, so
+           the formats are checked once, here, rather than per blitter. */
+        if (SDL_Is8888Format(sf, SDL_TRUE) && SDL_Is8888Format(df, SDL_FALSE)) {
+#if SDL_BLIT_X86_SIMD
+            probeSimd();
+            if (hasAVX2) {
+                return Blit8888to8888PixelAlphaSwizzleAVX2;
+            }
+            if (hasSSE41) {
+                return Blit8888to8888PixelAlphaSwizzleSSE41;
+            }
+#endif
             if (sf->Ashift == df->Ashift && sf->Bshift == df->Bshift && sf->Gshift == df->Gshift && sf->Rshift == df->Rshift) {
                 return Blit8888to8888PixelAlpha;
             } else {
