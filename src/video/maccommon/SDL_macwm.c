@@ -26,7 +26,7 @@
 #elif TARGET_API_MAC_CARBON && (UNIVERSAL_INTERFACES_VERSION > 0x0335)
 #include <Carbon.h>
 #else
-#include <Windows.h>
+#include <windows.h>
 #include <Strings.h>
 #endif
 

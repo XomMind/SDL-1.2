@@ -26,7 +26,7 @@
 #include "SDL_audio.h"
 #include "SDL_wave.h"
 #if defined(_MSC_VER)
-#include <Windows.h>
+#include <windows.h>
 #include <Libloaderapi.h>
 #endif
 
@@ -578,7 +578,7 @@ done:
 /* Since the WAV memory is allocated in the shared library, it must also
    be freed here.  (Necessary under Win32, VC++)
  */
-#include "Windows.h"
+#include "windows.h"
 void SDL_FreeWAV(Uint8 *audio_buf)
 {
 	if ( audio_buf != NULL ) {
