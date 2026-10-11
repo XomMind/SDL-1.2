@@ -11,4 +11,4 @@ License always applies. I am not a lawyer. I use AI tooling I made myself by han
 Bunch of games getting fixed here
 ---------------------------------
 
-You love to see it. Starting with Cogmind, now ported to SDL2+ with GPU too. CPU only engine? Not on my watch.
+You love to see it. Starting with Cogmind, now ported to SDL2+ with GPU too. CPU only engine? Broken sdl12_compat upstream can't fix when sdl2_compat's on fire? Not on my watch.
