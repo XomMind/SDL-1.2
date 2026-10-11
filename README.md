@@ -6,7 +6,7 @@ I wanted to decompile old games, and new games, anything that uses SDL-1.2 up to
 AIs don't write code, I write features and fixes
 ------------------------------------------------
 
-License always applies. I am not a lawyer. I use AI tooling. I know SDL upstream would appreciate that disclaimer before I get pinged in any threads again asking to relicense.
+License always applies. I am not a lawyer. I use AI tooling I made myself by hand for use at home in private. I know SDL upstream would appreciate that disclaimer before I get pinged in any threads again asking to relicense.
 
 Bunch of games getting fixed here
 ---------------------------------
