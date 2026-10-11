@@ -1,7 +1,7 @@
 Why I made this
 ===============
 
-I wanted to decompile old games, and new games, anything that uses SDL-1.2 up to SDL3. Having an entry with a DLL like this, or large known assembly target, makes decompilation -> natural language human notes -> clean room sit-down recompilation with valid provenance and only one dubious component...
+I wanted to decompile old games, and new games, anything that uses SDL-1.2 up to SDL3. Having an entry with a DLL like this, or large known assembly target, makes decompilation -> natural language human notes -> clean room sit-down recompilation with valid provenance and only one dubious component... someone who isn't me.
 
 AIs don't write code, I write features and fixes
 ------------------------------------------------
