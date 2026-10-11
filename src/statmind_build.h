@@ -95,7 +95,7 @@ static const StatmindBuild *Statmind_FindBuild(const unsigned char *base)
     for (i = 0; i < sizeof(statmind_builds) / sizeof(statmind_builds[0]); ++i) {
         b = &statmind_builds[i];
         if (stamp != b->timestamp) continue;
-        if (Statmind_BuildU32(base + pe + 24 + 56) != b->image_size) return NULL;
+        if (Statmind_BuildU32(base + pe + 24 + 56) < b->image_size) return NULL; /* PRIVATE: hybrid appends sections, so accept growth */
         if (memcmp(base + b->init + 10, "\xC7\x00\x4C\xFA\xAD\x64", 6) ||
             memcmp(base + b->init + 19, "\xC7\x41\x04\xD9\x3E\x53\x79", 7) ||
             memcmp(base + b->writer, b->writer_sig, 10) ||
