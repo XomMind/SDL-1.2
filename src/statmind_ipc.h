@@ -481,6 +481,184 @@ static int Statmind_IPCThread(void *data);
 
 static int ipc_thread_running = 0;
 
+/* PRIVATE headless harness: framebuffer exported by the dummy video driver. */
+extern unsigned char *g_statmind_fb;
+extern int g_statmind_fb_w, g_statmind_fb_h, g_statmind_fb_bpp;
+
+static void Statmind_PutLE32(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+/* When "framedump.req" exists in the working directory, write the current framebuffer as a
+ * top-down 32-bit BMP to "framedump.bmp" (via a temp file), then delete the request. */
+static void Statmind_FrameDumpPoll(void)
+{
+    FILE *f;
+    unsigned char hdr[54];
+    unsigned int bytes;
+    if (!g_statmind_fb || g_statmind_fb_bpp != 32) return;
+    f = fopen("framedump.req", "rb");
+    if (!f) return;
+    fclose(f);
+    bytes = (unsigned int)g_statmind_fb_w * (unsigned int)g_statmind_fb_h * 4;
+    memset(hdr, 0, sizeof(hdr));
+    hdr[0] = 'B'; hdr[1] = 'M';
+    Statmind_PutLE32(hdr + 2, 54 + bytes);
+    Statmind_PutLE32(hdr + 10, 54);
+    Statmind_PutLE32(hdr + 14, 40);
+    Statmind_PutLE32(hdr + 18, (unsigned int)g_statmind_fb_w);
+    Statmind_PutLE32(hdr + 22, (unsigned int)(-g_statmind_fb_h)); /* negative: top-down */
+    hdr[26] = 1; hdr[28] = 32;
+    Statmind_PutLE32(hdr + 34, bytes);
+    f = fopen("framedump.tmp", "wb");
+    if (f) {
+        fwrite(hdr, 1, sizeof(hdr), f);
+        fwrite(g_statmind_fb, 1, bytes, f);
+        fclose(f);
+        remove("framedump.bmp");
+        rename("framedump.tmp", "framedump.bmp");
+    }
+    remove("framedump.req");
+}
+
+/* PRIVATE headless harness (Beta 17.1 retail layout only): the dev-access gate store in GM::initialize.
+ * Request file "wizgate.req" holds '1' (set), '0' (clear) or 'S' (state only). The anchor instruction
+ * `mov byte [0xCEFACC], 1` at 0x78B037 must match before anything is written. Result goes to "wizgate.ack".
+ * Only the gate byte is touched; activation still needs the game's own double-command and run.log text. */
+static void Statmind_WizardPoll(void)
+{
+    FILE *f = fopen("wizgate.req", "rb");
+    int cmd, gm_wizard = -1;
+    char line[200];
+    unsigned char *gate = (unsigned char *)0xCEFACC;
+    unsigned char *player_wizard = (unsigned char *)(0xCF45D8 + 0x50);
+    unsigned char **gm = (unsigned char **)0xCEFAA8;
+    if (!f) return;
+    cmd = fgetc(f);
+    fclose(f);
+    remove("wizgate.req");
+    if (memcmp((const void *)0x78B037, "\xC6\x05\xCC\xFA\xCE\x00\x01", 7)) {
+        sprintf(line, "refused: gate anchor differs\n");
+    } else {
+        unsigned char prev = *gate;
+        if (*gm) gm_wizard = (*gm)[0x10];
+        if (cmd == '0' || cmd == '1') *gate = (unsigned char)(cmd - '0');
+        sprintf(line, "ok prev=%u now=%u player_wizard=%u gm_wizard=%d\n",
+                (unsigned)prev, (unsigned)*gate, (unsigned)*player_wizard, gm_wizard);
+    }
+    f = fopen("wizgate.tmp", "wb");
+    if (f) {
+        fputs(line, f);
+        fclose(f);
+        remove("wizgate.ack");
+        rename("wizgate.tmp", "wizgate.ack");
+    }
+}
+
+/* PRIVATE headless harness: main-thread EIP sampling profiler, driven from the 1 ms IPC loop.
+ * "prof.req" = '1' starts (and clears), '0' stops and writes "prof.txt":
+ *   "total N", "other N", then "<hex 16-byte bucket> <count>" (self samples inside the image) and
+ *   "c <hex bucket> <count>" (samples outside the image, attributed to the nearest call-site return
+ *   address found on the stack inside the image). "prof.ack" appears when the dump is complete. */
+#define STATMIND_PROF_LO   0x400000u
+#define STATMIND_PROF_SPAN 0x1400000u
+static unsigned int g_prof_hist[STATMIND_PROF_SPAN >> 4];
+static unsigned int g_prof_caller[STATMIND_PROF_SPAN >> 4];
+static unsigned int g_prof_total = 0, g_prof_other = 0;
+static int g_prof_active = 0;
+static HANDLE g_prof_main = NULL;
+
+static int Statmind_ProfInImage(unsigned int a)
+{
+    return a >= STATMIND_PROF_LO && a < STATMIND_PROF_LO + STATMIND_PROF_SPAN;
+}
+
+static void Statmind_ProfInit(void)
+{
+    /* Called from the first SDL_Init, on the game's main thread. */
+    if (!g_prof_main)
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_prof_main,
+                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0);
+}
+
+/* IsBadReadPtr consumes PAGE_GUARD on stack pages (the stack then cannot grow), which is unsafe against a live
+ * thread. VirtualQuery only inspects the region, and refuses guard and no-access pages. */
+static int Statmind_ProfReadable(const void *p)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
+    return 1;
+}
+
+static void Statmind_ProfSample(void)
+{
+    CONTEXT c;
+    unsigned int eip;
+    if (!g_prof_active || !g_prof_main) return;
+    if (SuspendThread(g_prof_main) == (DWORD)-1) return;
+    memset(&c, 0, sizeof(c));
+    c.ContextFlags = CONTEXT_CONTROL;
+    if (GetThreadContext(g_prof_main, &c)) {
+        eip = (unsigned int)c.Eip;
+        g_prof_total++;
+        if (Statmind_ProfInImage(eip)) {
+            g_prof_hist[(eip - STATMIND_PROF_LO) >> 4]++;
+        } else {
+            unsigned int *sp = (unsigned int *)c.Esp;
+            int i;
+            g_prof_other++;
+            for (i = 0; i < 512; ++i) {
+                unsigned int v;
+                if (!Statmind_ProfReadable(sp + i)) break;
+                v = sp[i];
+                if (Statmind_ProfInImage(v) && Statmind_ProfReadable((const void *)(v - 5)) && *(unsigned char *)(v - 5) == 0xE8) {
+                    g_prof_caller[(v - STATMIND_PROF_LO) >> 4]++;
+                    break;
+                }
+            }
+        }
+    }
+    ResumeThread(g_prof_main);
+}
+
+static void Statmind_ProfPoll(void)
+{
+    FILE *f = fopen("prof.req", "rb");
+    int cmd;
+    unsigned int i;
+    if (!f) return;
+    cmd = fgetc(f);
+    fclose(f);
+    remove("prof.req");
+    if (cmd == '1') {
+        g_prof_active = 0;
+        memset(g_prof_hist, 0, sizeof(g_prof_hist));
+        memset(g_prof_caller, 0, sizeof(g_prof_caller));
+        g_prof_total = g_prof_other = 0;
+        remove("prof.ack");
+        g_prof_active = 1;
+    } else if (cmd == '0') {
+        g_prof_active = 0;
+        f = fopen("prof.tmp", "wb");
+        if (f) {
+            fprintf(f, "total %u\nother %u\n", g_prof_total, g_prof_other);
+            for (i = 0; i < (STATMIND_PROF_SPAN >> 4); ++i)
+                if (g_prof_hist[i]) fprintf(f, "%08x %u\n", STATMIND_PROF_LO + (i << 4), g_prof_hist[i]);
+            for (i = 0; i < (STATMIND_PROF_SPAN >> 4); ++i)
+                if (g_prof_caller[i]) fprintf(f, "c %08x %u\n", STATMIND_PROF_LO + (i << 4), g_prof_caller[i]);
+            fclose(f);
+            remove("prof.txt");
+            rename("prof.tmp", "prof.txt");
+        }
+        f = fopen("prof.ack", "wb");
+        if (f) { fputs("done\n", f); fclose(f); }
+    }
+}
+
 /* Push a bare key event with no modifier bookkeeping. */
 static void Statmind_PushRaw(SDLKey sym, SDLMod mods, unsigned short uni, int down)
 {
@@ -595,6 +773,7 @@ static void Statmind_StartIPC()
         // The guard we are opening is only read on the map-load path.
         Statmind_EnableLuigiAi();
         Statmind_ResolveScoresheet();
+        Statmind_ProfInit();
 
         printf("[Statmind_StartIPC] Creating IPC thread.\n");
         fflush(stdout);
@@ -627,6 +806,11 @@ static int Statmind_IPCThread(void *data)
             poll_count = 0;
             Statmind_ReassertLuigiAi();
         }
+
+        if (poll_count % 50 == 0) Statmind_FrameDumpPoll();
+        if (poll_count % 50 == 25) Statmind_WizardPoll();
+        if (poll_count % 50 == 10) Statmind_ProfPoll();
+        Statmind_ProfSample();
 
         if (g_statmind_mailbox.seq == g_statmind_mailbox.ack) {
             continue;

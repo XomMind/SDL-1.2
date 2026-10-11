@@ -46,6 +46,12 @@
 #include "SDL_nullevents_c.h"
 #include "SDL_nullmouse_c.h"
 
+#include <stdlib.h>
+
+/* PRIVATE headless harness: the framebuffer is exported so statmind_ipc.h can dump it on request. */
+unsigned char *g_statmind_fb = NULL;
+int g_statmind_fb_w = 0, g_statmind_fb_h = 0, g_statmind_fb_bpp = 0;
+
 #define DUMMYVID_DRIVER_NAME "dummy"
 
 /* Initialization/Query functions */
@@ -144,10 +150,16 @@ int DUMMY_VideoInit(_THIS, SDL_PixelFormat *vformat)
 	fprintf(stderr, "WARNING: You are using the SDL dummy video driver!\n");
 	*/
 
-	/* Determine the screen depth (use default 8-bit depth) */
-	/* we change this during the SDL_SetVideoMode implementation... */
-	vformat->BitsPerPixel = 8;
-	vformat->BytesPerPixel = 1;
+	/* PRIVATE headless harness: report a desktop (the stock dummy driver leaves
+	   it 0x0, so Cogmind finds "No fonts fit in desktop") and the 32-bit depth
+	   windib reports. Size: STATMIND_DESKTOP_W / STATMIND_DESKTOP_H, default 2560x1440. */
+	{
+		const char *w = getenv("STATMIND_DESKTOP_W"), *h = getenv("STATMIND_DESKTOP_H");
+		this->info.current_w = w ? atoi(w) : 2560;
+		this->info.current_h = h ? atoi(h) : 1440;
+	}
+	vformat->BitsPerPixel = 32;
+	vformat->BytesPerPixel = 4;
 
 	/* We're done! */
 	return(0);
@@ -189,6 +201,10 @@ SDL_Surface *DUMMY_SetVideoMode(_THIS, SDL_Surface *current,
 	this->hidden->h = current->h = height;
 	current->pitch = current->w * (bpp / 8);
 	current->pixels = this->hidden->buffer;
+	g_statmind_fb = this->hidden->buffer;
+	g_statmind_fb_w = width;
+	g_statmind_fb_h = height;
+	g_statmind_fb_bpp = bpp;
 
 	/* We're done */
 	return(current);
